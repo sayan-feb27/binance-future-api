@@ -3,16 +3,16 @@ import hashlib
 import asyncio
 import datetime
 import urllib.parse
-import itertools
 from collections import OrderedDict
 from typing import Callable, Any
-
 
 import aiohttp
 from pydantic import BaseSettings
 
 
-async def make_any_request(url: str, method: str, **kwargs) -> dict[str, Any]:
+async def make_any_request(
+    url: str, method: str, **kwargs
+) -> list[dict[str, Any]] | dict[str, Any]:
     await asyncio.sleep(0.5)
 
     async with aiohttp.ClientSession() as session:
@@ -61,7 +61,7 @@ class BinanceFuture:
         symbol: str,
         limit: int = 500,
         from_date: datetime.datetime | None = None,
-        to_date: datetime.datetime | None = None
+        to_date: datetime.datetime | None = None,
     ) -> list[str]:
         url = urllib.parse.urljoin(self.base_url, self.user_trades_endpoint)
         params = OrderedDict(
@@ -72,12 +72,17 @@ class BinanceFuture:
         )
         headers = {"X-MBX-APIKEY": self.settings.api_key}
 
+        if limit <= 1 or limit > 1000:
+            raise Exception("Limit should be greater than 1 and less or equal to 1000.")
+
         if not to_date:
             to_date = (
-                datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                datetime.datetime.now().replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
                 if not from_date
                 else (from_date + datetime.timedelta(days=7)).replace(
-                   hour=0, minute=0, second=0, microsecond=0
+                    hour=0, minute=0, second=0, microsecond=0
                 )
             )
 
@@ -94,29 +99,55 @@ class BinanceFuture:
                 "and to_date cannot be longer than 7 days."
             )
 
-        dates = [
-            from_date + datetime.timedelta(days=index)
-            for index in range((to_date - from_date).days)
-        ]
-        tasks = []
-        for date in dates:
-            copy_params = params.copy()
-            copy_params.update(
-                {
-                    "startTime": int(date.timestamp()) * 1000,
-                    "endTime": int(
-                        (date + datetime.timedelta(days=1)).timestamp()
-                    ) * 1000,
-                    "timestamp": int(datetime.datetime.now().timestamp()) * 1000,
-                }
+        from_id = None
+        trades = []
+        batch_latest_trade = None
+        while True:
+            if from_id:
+                params["fromId"] = from_id
+                params.pop("startTime", None)
+                params.pop("endTime", None)
+            else:
+                params.update(
+                    {
+                        "startTime": int(from_date.timestamp()) * 1000,
+                        "endTime": int(
+                            (from_date + datetime.timedelta(days=1)).timestamp()
+                        )
+                        * 1000,
+                    }
+                )
+            params["timestamp"] = int(datetime.datetime.now().timestamp()) * 1000
+            # binance api requires signature to be the last param
+            params.pop("signature", None)
+            params["signature"] = self.make_signature(
+                message=urllib.parse.urlencode(params).encode("utf-8")
             )
-            copy_params["signature"] = self.make_signature(
-                message=urllib.parse.urlencode(copy_params).encode("utf-8")
-            )
-            task = make_any_request(url, method="get", params=copy_params, headers=headers)
-            tasks.append(task)
 
-        trades = list(itertools.chain.from_iterable(await asyncio.gather(*tasks, return_exceptions=True)))
+            batch_trades = await make_any_request(
+                url, method="get", params=params, headers=headers
+            )
+            if not batch_trades or batch_trades[-1] == batch_latest_trade:
+                break
+
+            trades.extend(
+                [
+                    t
+                    for t in batch_trades
+                    if t != batch_latest_trade
+                    and datetime.datetime.fromtimestamp(t.get("time") / 1000) < to_date
+                ]
+            )
+            batch_latest_trade = batch_trades[-1]
+            if (
+                datetime.datetime.fromtimestamp(batch_latest_trade.get("time") / 1000)
+                >= to_date
+            ):
+                break
+
+            from_id = batch_latest_trade["id"]
+
+            await asyncio.sleep(0.5)
         return trades
 
     def make_signature(
@@ -129,9 +160,6 @@ class BinanceFuture:
             encoder(self.settings.api_secret), msg=message, digestmod=method
         ).hexdigest()
 
-    # async def __get_trades(self, url: str, method: str = "get", **kwargs):
-
-
 
 async def main():
     settings: Settings = Settings()
@@ -143,7 +171,8 @@ async def main():
     await asyncio.sleep(0.1)
 
     trades = await binance.get_user_trades(
-        symbol=symbols[0], limit=500,
+        symbol=symbols[0],
+        limit=2,
         from_date=datetime.datetime(year=2023, month=2, day=9),
         to_date=datetime.datetime(year=2023, month=2, day=11),
     )
