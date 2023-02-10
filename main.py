@@ -123,7 +123,7 @@ class BinanceFuture:
             params["signature"] = self.make_signature(
                 message=urllib.parse.urlencode(params).encode("utf-8")
             )
-
+            # TODO: won't work if the first date returns empty list
             batch_trades = await make_any_request(
                 url, method="get", params=params, headers=headers
             )
